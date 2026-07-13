@@ -301,6 +301,20 @@ export function retainGatewayRootWorkAdmissionContinuation(): (() => void) | nul
   return createGatewayRootWorkRelease(current);
 }
 
+/** Poll until all tracked root work completes or the timeout expires. */
+export async function waitForGatewayRootWorkDrain(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (getActiveGatewayRootWorkCount() === 0) {
+      return true;
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 50).unref?.();
+    });
+  }
+  return getActiveGatewayRootWorkCount() === 0;
+}
+
 /** Active root requests/ticks, optionally excluding the caller running prepare. */
 export function getActiveGatewayRootWorkCount(opts?: { excludeCurrent?: boolean }): number {
   let count = GATEWAY_WORK_ADMISSION_STATE.activeRootWork.size;

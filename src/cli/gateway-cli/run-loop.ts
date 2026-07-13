@@ -16,6 +16,10 @@ import type { GatewayBootLifecycleCompletion } from "../../infra/gateway-boot-li
 import { acquireGatewayLock } from "../../infra/gateway-lock.js";
 import type { GatewayRestartEmitter } from "../../infra/restart.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import {
+  getActiveGatewayRootWorkCount,
+  waitForGatewayRootWorkDrain,
+} from "../../process/gateway-work-admission.js";
 import type { RuntimeEnv } from "../../runtime.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { formatActiveTaskRestartBlocker } from "../../tasks/task-restart-blocker.js";
@@ -26,6 +30,7 @@ const RESTART_DRAIN_STILL_PENDING_WARN_MS = 30_000;
 const RESTART_CLOSE_REPLY_DRAIN_SHUTDOWN_RESERVE_MS = 10_000;
 const UPDATE_RESPAWN_HEALTH_TIMEOUT_MS = 10_000;
 const UPDATE_RESPAWN_HEALTH_POLL_MS = 200;
+const STOP_ROOT_WORK_DRAIN_TIMEOUT_MS = 2_000;
 
 type GatewayRunSignalAction = "stop" | "restart";
 type RestartDrainTimeoutMs = number | undefined;
@@ -359,6 +364,21 @@ export async function runGatewayLoop(params: {
   };
   const handleStopAfterServerClose = async () => {
     params.completeBoot?.({ outcome: "clean_stop", reason: "gateway.stop" });
+    // Drain any remaining gateway root work continuations (e.g. session_end
+    // hooks started by reset/delete/compaction that the shutdown tracker has
+    // already forgotten). Without this bounded wait, the process exits before
+    // these fire-and-forget hooks settle, losing database writes and memory
+    // summaries (#105697).
+    const rootWorkCount = getActiveGatewayRootWorkCount();
+    if (rootWorkCount > 0) {
+      gatewayLog.info(`waiting for ${rootWorkCount} gateway root work continuation(s) before stop`);
+      const drained = await waitForGatewayRootWorkDrain(STOP_ROOT_WORK_DRAIN_TIMEOUT_MS);
+      if (!drained) {
+        gatewayLog.warn(
+          `stop drain timed out with ${getActiveGatewayRootWorkCount()} root work continuation(s) still pending`,
+        );
+      }
+    }
     await releaseLockIfHeld();
     exitProcess(0);
   };
